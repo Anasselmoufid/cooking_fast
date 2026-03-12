@@ -8,7 +8,7 @@ from functools import lru_cache
 import aiohttp
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -19,7 +19,7 @@ from deep_translator import GoogleTranslator
 import pandas as pd
 
 # ──────────────── إعدادات ────────────────
-TOKEN = "8719774473:AAG6_COb6UElTsmzxlJJNaltmrJoL5QsqvQ"   # ← غيّر التوكن هنا
+TOKEN = "8719774473:AAG6_COb6UElTsmzxlJJNaltmrJoL5QsqvQ"   # ← غيّر التوكن
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=TOKEN)
@@ -52,7 +52,7 @@ CONTINENT_MAP = {
     "American": "North America", "Mexican": "North America",
 }
 
-@lru_cache(maxsize=1000)
+@lru_cache(maxsize=2000)
 def fast_translate(text: str, target: str) -> str:
     if target == 'en' or not text:
         return text
@@ -137,22 +137,19 @@ def export_to_excel():
 class SearchForm(StatesGroup):
     waiting_for_query = State()
 
-# ──────────────── القوائم ────────────────
-def get_main_menu(lang: str) -> InlineKeyboardMarkup:
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🍳 وصفة عشوائية" if lang=='ar' else "🍳 Random Recipe", callback_data="random")],
-        [InlineKeyboardButton(text="🔍 بحث عن وصفة" if lang=='ar' else "🔍 Search Recipe", callback_data="search")],
-        [InlineKeyboardButton(text="🔄 ابدأ من جديد" if lang=='ar' else "🔄 Start Over", callback_data="restart")],
-    ])
+# ──────────────── القائمة الدائمة تحت خانة الكتابة ────────────────
+def get_persistent_keyboard(lang: str) -> ReplyKeyboardMarkup:
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="🍳 وصفة عشوائية" if lang=='ar' else "🍳 Random Recipe")],
+            [KeyboardButton(text="🔍 بحث عن وصفة" if lang=='ar' else "🔍 Search Recipe")],
+            [KeyboardButton(text="📊 عرض الوصفات المحفوظة" if lang=='ar' else "📊 Saved Recipes")],
+            [KeyboardButton(text="🔄 ابدأ من جديد" if lang=='ar' else "🔄 Start Over")],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
     return kb
-
-async def show_main_menu(message_or_call, lang: str):
-    kb = get_main_menu(lang)
-    text = "اختر خياراً ↓" if lang=='ar' else "Choose an option ↓"
-    if isinstance(message_or_call, types.Message):
-        await message_or_call.answer(text, reply_markup=kb)
-    else:
-        await message_or_call.message.edit_text(text, reply_markup=kb)
 
 # ──────────────── الأوامر والأزرار ────────────────
 @router.message(Command("start"))
@@ -174,44 +171,50 @@ async def set_language(callback: types.CallbackQuery):
         json.dump(user_languages, f, ensure_ascii=False, indent=2)
 
     await callback.message.edit_text("✅ تم حفظ اللغة!", reply_markup=None)
-    await show_main_menu(callback, lang)
+    await callback.message.answer(
+        "اختر خياراً ↓" if lang=='ar' else "Choose an option ↓",
+        reply_markup=get_persistent_keyboard(lang)
+    )
     await callback.answer()
 
-@router.callback_query(lambda c: c.data == "restart")
-async def restart(callback: types.CallbackQuery):
-    lang = user_languages.get(str(callback.from_user.id), 'ar')
-    await show_main_menu(callback, lang)
-    await callback.answer("تم العودة للقائمة الرئيسية ✓")
+@router.message(lambda m: m.text in ["🔄 ابدأ من جديد", "🔄 Start Over"])
+async def restart(message: types.Message):
+    lang = user_languages.get(str(message.from_user.id), 'ar')
+    await message.answer(
+        "اختر خياراً ↓" if lang=='ar' else "Choose an option ↓",
+        reply_markup=get_persistent_keyboard(lang)
+    )
 
-@router.callback_query(lambda c: c.data == "random")
-async def random_recipe(callback: types.CallbackQuery):
-    lang = user_languages.get(str(callback.from_user.id), 'ar')
+@router.message(lambda m: m.text in ["🍳 وصفة عشوائية", "🍳 Random Recipe"])
+async def random_recipe(message: types.Message):
+    lang = user_languages.get(str(message.from_user.id), 'ar')
+    await message.answer("جاري جلب وصفة عشوائية... ⏳")
+
     async with aiohttp.ClientSession() as session:
         meal = await fetch_recipe(session)
         if not meal:
-            await callback.answer("خطأ في جلب الوصفة", show_alert=True)
+            await message.answer("حدث خطأ في جلب الوصفة، جرب مرة أخرى.")
             return
 
         text, photo_url, raw_meal = format_recipe(meal, lang)
-        cache_recipe(callback.from_user.id, callback.from_user.username, raw_meal, lang)
+        cache_recipe(message.from_user.id, message.from_user.username, raw_meal, lang)
 
-        await callback.message.answer_photo(photo=photo_url, caption=text)
-        # العودة للقائمة الرئيسية تلقائيًا
-        await show_main_menu(callback, lang)
-        await callback.answer("تم الحفظ ✓")
+        await message.answer_photo(photo=photo_url, caption=text)
+        await message.answer("اختر خياراً ↓", reply_markup=get_persistent_keyboard(lang))
 
-@router.callback_query(lambda c: c.data == "search")
-async def start_search(callback: types.CallbackQuery, state: FSMContext):
-    lang = user_languages.get(str(callback.from_user.id), 'ar')
+@router.message(lambda m: m.text in ["🔍 بحث عن وصفة", "🔍 Search Recipe"])
+async def start_search(message: types.Message, state: FSMContext):
+    lang = user_languages.get(str(message.from_user.id), 'ar')
     text = "اكتب اسم الطبق (بالعربية أو الإنجليزية):" if lang=='ar' else "Type the dish name:"
-    await callback.message.answer(text)
+    await message.answer(text)
     await state.set_state(SearchForm.waiting_for_query)
-    await callback.answer()
 
 @router.message(SearchForm.waiting_for_query)
 async def process_search(message: types.Message, state: FSMContext):
     lang = user_languages.get(str(message.from_user.id), 'ar')
     query = message.text.strip()
+
+    await message.answer("جاري البحث... ⏳")
 
     if lang != 'en':
         query = fast_translate(query, 'en')
@@ -221,7 +224,7 @@ async def process_search(message: types.Message, state: FSMContext):
         if not meal:
             await message.answer("❌ لم أجد وصفة بهذا الاسم، جرب اسم آخر.")
             await state.clear()
-            await show_main_menu(message, lang)  # عودة للقائمة
+            await message.answer("اختر خياراً ↓", reply_markup=get_persistent_keyboard(lang))
             return
 
         text, photo_url, raw_meal = format_recipe(meal, lang)
@@ -229,9 +232,9 @@ async def process_search(message: types.Message, state: FSMContext):
 
         await message.answer_photo(photo=photo_url, caption=text)
         await state.clear()
-        await show_main_menu(message, lang)  # عودة للقائمة بعد الوصفة
+        await message.answer("اختر خياراً ↓", reply_markup=get_persistent_keyboard(lang))
 
-@router.message(Command("recipes", "وصفات"))
+@router.message(lambda m: m.text in ["📊 عرض الوصفات المحفوظة", "📊 Saved Recipes"])
 async def cmd_recipes(message: types.Message):
     if export_to_excel():
         await message.answer_document(document=FSInputFile(EXCEL_FILE),
