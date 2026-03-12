@@ -1,3 +1,5 @@
-telebot
-pyTelegramBotAPI
-yt-dlp
+Flask==3.1.0
+pyTelegramBotAPI==4.26.0
+yt-dlp==2025.3.21
+requests==2.32.3
+gunicorn==21.2.0
