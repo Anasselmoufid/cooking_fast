@@ -13,12 +13,11 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
+from youtube_search_python import VideosSearch
 import pandas as pd
 
 # ──────────────── إعدادات ────────────────
-TOKEN = os.environ.get("BOT_TOKEN") or "8719774473:AAG6_COb6UElTsmzxlJJNaltmrJoL5QsqvQ"  # يفضل استخدام env var
-SPOONACULAR_KEY = os.environ.get("SPOONACULAR_KEY") or "bd7328461e664336834eb1e43e82b248"
-
+TOKEN = "8719774473:AAG6_COb6UElTsmzxlJJNaltmrJoL5QsqvQ"  # ← غيّر التوكن
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=TOKEN)
@@ -27,9 +26,10 @@ dp = Dispatcher(storage=storage)
 router = Router()
 dp.include_router(router)
 
-EXCEL_FILE = "recipes.xlsx"
+EXCEL_FILE = "youtube_recipes.xlsx"
 saved_recipes = []
 
+# ──────────────── لوحة المفاتيح الدائمة ────────────────
 def main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -41,86 +41,117 @@ def main_keyboard():
         one_time_keyboard=False
     )
 
-async def search_spoonacular(query: str):
-    if not SPOONACULAR_KEY or SPOONACULAR_KEY == "YOUR_SPOONACULAR_API_KEY":
-        return [], "خطأ: مفتاح Spoonacular غير موجود أو غير صحيح"
+# ──────────────── تخمين الدولة والقارة من العنوان ────────────────
+COUNTRY_MAP = {
+    "moroccan": "المغرب", "egyptian": "مصر", "tunisian": "تونس",
+    "indian": "الهند", "italian": "إيطاليا", "mexican": "المكسيك",
+    "thai": "تايلاند", "chinese": "الصين", "japanese": "اليابان",
+    "american": "أمريكا", "british": "بريطانيا", "french": "فرنسا"
+}
 
-    # بحث بالعربية + ترجمة إنجليزية تلقائية
-    english_query = query
-    try:
-        from deep_translator import GoogleTranslator
-        english_query = GoogleTranslator(source='ar', target='en').translate(query)
-    except:
-        pass
+CONTINENT_MAP = {
+    "المغرب": "أفريقيا", "مصر": "أفريقيا", "تونس": "أفريقيا",
+    "الهند": "آسيا", "الصين": "آسيا", "اليابان": "آسيا",
+    "إيطاليا": "أوروبا", "فرنسا": "أوروبا", "بريطانيا": "أوروبا",
+    "أمريكا": "أمريكا الشمالية", "المكسيك": "أمريكا الشمالية"
+}
 
-    url = f"https://api.spoonacular.com/recipes/complexSearch?query={english_query}&number=6&addRecipeInformation=true&apiKey={SPOONACULAR_KEY}"
-    logging.info(f"جاري البحث في Spoonacular: {url}")
+def guess_country(title: str):
+    title_lower = title.lower()
+    for key, country in COUNTRY_MAP.items():
+        if key in title_lower:
+            return country, CONTINENT_MAP.get(country, "العالم")
+    return "غير معروف", "العالم"
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as resp:
-            logging.info(f"حالة الرد: {resp.status}")
-            if resp.status != 200:
-                text = await resp.text()
-                logging.error(f"خطأ Spoonacular: {resp.status} - {text}")
-                return [], f"خطأ من Spoonacular: حالة {resp.status}"
-            data = await resp.json()
-            results = data.get("results", [])
-            logging.info(f"عدد النتائج: {len(results)}")
-            return results, None
+# ──────────────── بحث في يوتيوب فقط ────────────────
+async def search_youtube(query: str):
+    search = VideosSearch(query, limit=8)
+    results = []
 
-def format_recipe(recipe):
-    title = recipe.get("title", "غير معروف")
-    time = recipe.get("readyInMinutes", "?")
-    servings = recipe.get("servings", "?")
-    ingredients = [i["original"] for i in recipe.get("extendedIngredients", [])][:15]
+    for video in search.result()["result"]:
+        country, continent = guess_country(video["title"])
+        results.append({
+            "title": video["title"],
+            "channel": video["channel"]["name"],
+            "duration": video.get("duration", "?"),
+            "views": video.get("viewCount", "غير معروف"),
+            "link": f"https://youtube.com/watch?v={video['id']}",
+            "thumbnail": video["thumbnails"][0]["url"],
+            "country": country,
+            "continent": continent
+        })
+    return results
 
+# ──────────────── تنسيق الوصف الشامل ────────────────
+def format_video(video):
     text = f"""
-🍽 **{title}**
+🎥 **{video["title"]}**
 
-⏱ وقت التحضير: {time} دقيقة
-👥 لـ {servings} أشخاص
-
-📋 المكونات:
-• {'\n• '.join(ingredients)}
-
-🔗 رابط: {recipe.get("sourceUrl", "غير متوفر")}
+📍 الدولة: {video["country"]}
+🌍 القارة: {video["continent"]}
+👤 القناة: {video["channel"]}
+⏱ المدة: {video["duration"]}
+👁 المشاهدات: {video["views"]}
     """.strip()
+    return text
 
-    return text, recipe.get("image")
+# ──────────────── حفظ في Excel ────────────────
+def save_to_excel(video, user_id, username):
+    row = {
+        "التاريخ": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "العنوان": video["title"],
+        "الدولة": video["country"],
+        "القارة": video["continent"],
+        "القناة": video["channel"],
+        "المدة": video["duration"],
+        "المشاهدات": video["views"],
+        "الرابط": video["link"],
+        "User ID": user_id,
+        "Username": username or "غير معروف"
+    }
+    saved_recipes.append(row)
+    pd.DataFrame(saved_recipes).to_excel(EXCEL_FILE, index=False)
 
+# ──────────────── البداية ────────────────
 @router.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "🌍 مرحباً في بوت الوصفات الشامل!\n"
-        "اكتب أي وصفة تريدها (بالعربية أو الإنجليزية)\nمثال: كسكس، برجر، سوشي، فول مدمس...",
+        "🌍 مرحباً في بوت يوتيوب الوصفات الشامل!\n\n"
+        "اكتب اسم أي وجبة أو وصفة تريدها (بالعربية أو الإنجليزية)\n"
+        "مثال: كسكس، برجر، سوشي، فول مدمس، chicken biryani",
         reply_markup=main_keyboard()
     )
 
+@router.message(lambda m: m.text == "🔍 بحث عن وصفة")
+async def ask_search(message: types.Message):
+    await message.answer("اكتب اسم الوصفة أو الوجبة التي تريدها:")
+
 @router.message()
-async def search_handler(message: types.Message):
+async def youtube_search_handler(message: types.Message):
     query = message.text.strip()
-    if query in ["📊 الوصفات المحفوظة"]:
+
+    if query == "📊 الوصفات المحفوظة":
         if os.path.exists(EXCEL_FILE):
             await message.answer_document(types.FSInputFile(EXCEL_FILE), caption="📊 جميع الوصفات المحفوظة")
         else:
             await message.answer("لا توجد وصفات محفوظة بعد.")
         return
 
-    await message.answer(f"🔎 جاري البحث عن: {query}")
+    await message.answer(f"🔎 جاري البحث في يوتيوب عن: {query}")
 
-    results, error = await search_spoonacular(query)
-
-    if error:
-        await message.answer(error)
-        return
+    results = await search_youtube(query)
 
     if not results:
-        await message.answer("لم أجد نتائج. جرب كتابة الاسم بطريقة مختلفة أو بالإنجليزية.")
+        await message.answer("لم أجد نتائج. جرب كتابة الاسم بطريقة أخرى.")
         return
 
-    for r in results:
-        text, image = format_recipe(r)
-        await message.answer_photo(photo=image or "https://via.placeholder.com/512", caption=text)
+    for video in results:
+        text = format_video(video)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="▶️ مشاهدة الفيديو على يوتيوب", url=video["link"])]
+        ])
+        await message.answer_photo(photo=video["thumbnail"], caption=text, reply_markup=kb)
+        save_to_excel(video, message.from_user.id, message.from_user.username)
 
     await message.answer("اكتب وصفة جديدة أو اختر من الأزرار أدناه:", reply_markup=main_keyboard())
 
