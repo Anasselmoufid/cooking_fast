@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import json  # ← السطر الجديد المهم هنا
 from datetime import datetime
 
 import aiohttp
@@ -118,7 +119,7 @@ async def cmd_start(message: types.Message):
 async def set_language_and_show_countries(message: types.Message):
     lang = 'ar' if message.text == LANGUAGES['ar'] else 'en'
 
-    # حفظ اللغة (اختياري)
+    # حفظ اللغة
     user_id = str(message.from_user.id)
     with open("users_lang.json", "w", encoding="utf-8") as f:
         json.dump({user_id: lang}, f, ensure_ascii=False)
