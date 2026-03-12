@@ -14,9 +14,10 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from aiohttp import web
 
 import pandas as pd
+from youtubesearchpython import VideosSearch
 
 # ──────────────── إعدادات ────────────────
-TOKEN = "8719774473:AAG6_COb6UElTsmzxlJJNaltmrJoL5QsqvQ"                     # ← توكن البوت
+TOKEN = "8719774473:AAG6_COb6UElTsmzxlJJNaltmrJoL5QsqvQ"                     # توكن البوت
 SPOONACULAR_KEY = "bd7328461e664336834eb1e43e82b248"     # ← ضع مفتاح Spoonacular هنا
 
 bot = Bot(token=TOKEN)
@@ -40,95 +41,113 @@ def main_keyboard():
         one_time_keyboard=False
     )
 
-# ──────────────── بحث شامل باستخدام Spoonacular (الإنترنت كامل) ────────────────
-async def search_spoonacular(query: str):
-    url = f"https://api.spoonacular.com/recipes/complexSearch?query={query}&number=8&addRecipeInformation=true&apiKey={SPOONACULAR_KEY}"
+# ──────────────── بحث شامل (الإنترنت + يوتيوب) ────────────────
+async def search_full_internet(query: str):
+    # 1. بحث في Spoonacular (الإنترنت كامل)
+    url = f"https://api.spoonacular.com/recipes/complexSearch?query={query}&number=6&addRecipeInformation=true&apiKey={SPOONACULAR_KEY}"
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
-            if resp.status != 200:
-                return []
-            data = await resp.json()
-            return data.get("results", [])
+            if resp.status == 200:
+                data = await resp.json()
+                results = data.get("results", [])
+            else:
+                results = []
 
-# ──────────────── تنسيق الوصفة ────────────────
+    # 2. بحث في يوتيوب
+    yt_search = VideosSearch(f"{query} وصفة", limit=4)
+    yt_results = []
+    for v in yt_search.result()["result"]:
+        yt_results.append({
+            "title": v["title"],
+            "channel": v["channel"]["name"],
+            "link": f"https://youtube.com/watch?v={v['id']}",
+            "thumbnail": v["thumbnails"][0]["url"]
+        })
+
+    return results, yt_results
+
 def format_recipe(recipe):
     title = recipe.get("title", "غير معروف")
-    ready = recipe.get("readyInMinutes", "?")
+    time = recipe.get("readyInMinutes", "?")
     servings = recipe.get("servings", "?")
-    source = recipe.get("sourceUrl", "")
-
-    ingredients = [ing["original"] for ing in recipe.get("extendedIngredients", [])]
+    ingredients = [i["original"] for i in recipe.get("extendedIngredients", [])][:15]
 
     text = f"""
 🍽 **{title}**
 
-⏱ وقت التحضير: {ready} دقيقة
-👥 عدد الأشخاص: {servings}
+⏱ وقت التحضير: {time} دقيقة
+👥 لـ {servings} أشخاص
 
 📋 المكونات:
-• {'\n• '.join(ingredients[:15])}
-
-🔗 المصدر: {source}
+• {'\n• '.join(ingredients)}
     """.strip()
 
-    image = recipe.get("image")
-    return text, image
+    return text, recipe.get("image")
 
 # ──────────────── حفظ في Excel ────────────────
-def save_recipe(recipe, user_id, username):
+def save_to_excel(recipe, user_id, username, youtube_link=""):
     row = {
-        "التاريخ": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "التاريخ": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "العنوان": recipe.get("title"),
+        "الدولة/المطبخ": recipe.get("cuisines", ["غير معروف"])[0] if recipe.get("cuisines") else "غير معروف",
         "الوقت": recipe.get("readyInMinutes"),
-        "الصورة": recipe.get("image"),
-        "الرابط": recipe.get("sourceUrl"),
+        "عدد الأشخاص": recipe.get("servings"),
+        "المكونات": " • ".join([i["original"] for i in recipe.get("extendedIngredients", [])]),
+        "الرابط": recipe.get("sourceUrl", ""),
+        "يوتيوب": youtube_link,
         "User ID": user_id,
         "Username": username or "غير معروف"
     }
     saved_recipes.append(row)
     pd.DataFrame(saved_recipes).to_excel(EXCEL_FILE, index=False)
 
-# ──────────────── البداية ────────────────
+# ──────────────── البداية والأوامر ────────────────
 @router.message(Command("start"))
 async def start(message: types.Message):
     await message.answer(
-        "مرحباً بك في بوت الوصفات الشامل 🌍\n"
-        "اكتب اسم أي وصفة تريدها (بالعربية أو الإنجليزية)",
+        "🌍 مرحباً في بوت الوصفات الشامل!\n"
+        "اكتب أي وصفة تريدها (بالعربية أو الإنجليزية)\nمثال: كسكس، برجر، سوشي، فول مدمس...",
         reply_markup=main_keyboard()
     )
 
 @router.message(lambda m: m.text == "🔍 بحث عن وصفة")
-async def ask_search(message: types.Message):
-    await message.answer("اكتب اسم الوصفة التي تبحث عنها:")
+async def ask_for_recipe(message: types.Message):
+    await message.answer("اكتب اسم الوصفة التي تريدها:")
 
 @router.message()
-async def handle_any_message(message: types.Message):
+async def search_handler(message: types.Message):
     query = message.text.strip()
-    if query in ["📊 الوصفات المحفوظة", "🍳 وصفة عشوائية"]:
-        await message.answer("هذه الميزة قيد التطوير...")
+    if query in ["📊 الوصفات المحفوظة"]:
+        if os.path.exists(EXCEL_FILE):
+            await message.answer_document(types.FSInputFile(EXCEL_FILE), caption="📊 جميع الوصفات المحفوظة")
+        else:
+            await message.answer("لا توجد وصفات محفوظة بعد.")
         return
 
-    await message.answer("🔎 جاري البحث في الإنترنت كاملاً...")
+    await message.answer("🔎 جاري البحث في الإنترنت ويوتيوب...")
 
-    results = await search_spoonacular(query)
+    recipes, youtube_videos = await search_full_internet(query)
 
-    if not results:
-        await message.answer("لم أجد نتائج. جرب كتابة الاسم بطريقة مختلفة.")
+    if not recipes and not youtube_videos:
+        await message.answer("لم أجد نتائج. جرب كتابة الاسم بطريقة أخرى.")
         return
 
-    for r in results:
+    # عرض الوصفات
+    for r in recipes[:5]:
         text, image = format_recipe(r)
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="فتح الوصفة كاملة", url=r.get("sourceUrl", "#"))]
-        ])
-        await message.answer_photo(photo=image, caption=text, reply_markup=kb)
+        save_to_excel(r, message.from_user.id, message.from_user.username)
+        await message.answer_photo(photo=image, caption=text)
 
-    await message.answer("اكتب وصفة جديدة أو اختر من الأزرار أدناه:", reply_markup=main_keyboard())
+    # عرض فيديوهات يوتيوب
+    for v in youtube_videos:
+        await message.answer(f"🎥 {v['title']}\n{v['channel']}\n{v['link']}")
 
-# ──────────────── Webhook ────────────────
+    await message.answer("اكتب وصفة جديدة أو اضغط على الأزرار أدناه:", reply_markup=main_keyboard())
+
+# ──────────────── Webhook Setup ────────────────
 async def on_startup():
     await bot.delete_webhook(drop_pending_updates=True)
-    webhook_url = f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/webhook"
+    webhook_url = f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/webhook"
     await bot.set_webhook(webhook_url)
 
 app = web.Application()
