@@ -29,7 +29,7 @@ LANGUAGES = {
     'en': 'English 🇬🇧'
 }
 
-# قائمة الدول (من TheMealDB)
+# قائمة الدول المتاحة في TheMealDB
 COUNTRIES = [
     "American", "British", "Canadian", "Chinese", "Croatian", "Dutch", "Egyptian",
     "French", "Greek", "Indian", "Irish", "Italian", "Jamaican", "Japanese",
@@ -64,7 +64,7 @@ async def fetch_meal_details(session: aiohttp.ClientSession, meal_id: str):
         data = await resp.json()
         return data.get("meals", [None])[0]
 
-# ──────────────── تنسيق الوصفة (بسيط وآمن بدون parse_mode) ────────────────
+# ──────────────── تنسيق الوصفة (بدون parse_mode لتجنب الأخطاء) ────────────────
 def format_recipe(meal: dict, lang: str = 'ar') -> str:
     name = meal["strMeal"]
     area = meal["strArea"]
@@ -114,9 +114,14 @@ async def cmd_start(message: types.Message):
     )
 
 # ──────────────── حفظ اللغة وعرض قائمة الدول مباشرة ودائمة ────────────────
-@router.message(Text([LANGUAGES['ar'], LANGUAGES['en']]))
+@router.message(lambda message: message.text in [LANGUAGES['ar'], LANGUAGES['en']])
 async def set_language_and_show_countries(message: types.Message):
     lang = 'ar' if message.text == LANGUAGES['ar'] else 'en'
+
+    # حفظ اللغة (اختياري)
+    user_id = str(message.from_user.id)
+    with open("users_lang.json", "w", encoding="utf-8") as f:
+        json.dump({user_id: lang}, f, ensure_ascii=False)
 
     await message.answer(
         "تم اختيار اللغة ✓\nاختر دولة من القائمة أدناه:" if lang == 'ar' else
@@ -125,7 +130,7 @@ async def set_language_and_show_countries(message: types.Message):
     )
 
 # ──────────────── عند الضغط على دولة من القائمة ────────────────
-@router.message(Text(COUNTRIES))
+@router.message(lambda message: message.text in COUNTRIES)
 async def handle_country_selection(message: types.Message):
     country = message.text
     await message.answer(f"جاري جلب وصفات {country}... ⏳")
