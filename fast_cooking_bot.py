@@ -1,23 +1,25 @@
 import asyncio
 import logging
-from datetime import datetime
-import json
 import os
+import json
+from datetime import datetime
 from functools import lru_cache
 
+import aiohttp
 from aiogram import Bot, Dispatcher, Router, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
 
-import aiohttp
 from deep_translator import GoogleTranslator
 import pandas as pd
 
-# ──────────────── إعدادات ────────────────
-TOKEN = "8719774473:AAG6_COb6UElTsmzxlJJNaltmrJoL5QsqvQ"  # غيّره هنا
+# ──────────────── إعدادات أساسية ────────────────
+TOKEN = "8719774473:AAG6_COb6UElTsmzxlJJNaltmrJoL5QsqvQ"           # ← غيّر التوكن هنا
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=TOKEN)
@@ -30,6 +32,14 @@ USERS_FILE = "users_lang.json"
 EXCEL_FILE = "recipes.xlsx"
 recipes_cache = []  # تخزين مؤقت للوصفات (للسرعة)
 
+# متغير عالمي للغات المستخدمين
+user_languages = {}
+
+# تحميل اللغات عند البدء
+if os.path.exists(USERS_FILE):
+    with open(USERS_FILE, "r", encoding="utf-8") as f:
+        user_languages = json.load(f)
+
 LANGUAGES = {
     'ar': '🇸🇦 العربية',
     'en': '🇬🇧 English',
@@ -39,11 +49,14 @@ LANGUAGES = {
 }
 
 CONTINENT_MAP = {
-    "Egyptian": "Africa", "Moroccan": "Africa", "Italian": "Europe",
-    # ... أكمل باقي الخريطة إذا أردت
+    "Egyptian": "Africa", "Moroccan": "Africa", "Tunisian": "Africa",
+    "Saudi Arabian": "Asia", "Syrian": "Asia", "Turkish": "Asia",
+    "Italian": "Europe", "British": "Europe", "French": "Europe",
+    "American": "North America", "Mexican": "North America",
+    # أضف المزيد إذا أردت
 }
 
-# ──────────────── ترجمة مع cache قوي ────────────────
+# ──────────────── ترجمة مع cache ────────────────
 @lru_cache(maxsize=1000)
 def fast_translate(text: str, target: str) -> str:
     if target == 'en' or not text:
@@ -53,27 +66,23 @@ def fast_translate(text: str, target: str) -> str:
     except:
         return text
 
-# ──────────────── جلب وصفة (async) ────────────────
+# ──────────────── جلب الوصفة ────────────────
 async def fetch_recipe(session: aiohttp.ClientSession, query: str = None):
-    if query:
-        url = f"https://www.themealdb.com/api/json/v1/1/search.php?s={query}"
-    else:
-        url = "https://www.themealdb.com/api/json/v1/1/random.php"
-    
+    url = "https://www.themealdb.com/api/json/v1/1/random.php" if not query else \
+          f"https://www.themealdb.com/api/json/v1/1/search.php?s={query}"
     async with session.get(url) as resp:
         if resp.status != 200:
             return None
         data = await resp.json()
         return data.get("meals", [None])[0]
 
-# ──────────────── تنسيق الرسالة (مراحل مرقمة + تفاصيل) ────────────────
-def format_recipe(meal: dict, lang: str) -> tuple[str, str]:
+# ──────────────── تنسيق الوصفة ────────────────
+def format_recipe(meal: dict, lang: str) -> tuple:
     name = fast_translate(meal["strMeal"], lang)
     area = fast_translate(meal["strArea"], lang)
     continent = fast_translate(CONTINENT_MAP.get(meal["strArea"], "World"), lang)
     category = fast_translate(meal.get("strCategory", "Unknown"), lang)
 
-    # مكونات
     ingredients = []
     for i in range(1, 21):
         ing = meal.get(f"strIngredient{i}")
@@ -82,7 +91,6 @@ def format_recipe(meal: dict, lang: str) -> tuple[str, str]:
             line = f"{mea.strip()} {ing.strip()}" if mea and mea.strip() != "-" else ing.strip()
             ingredients.append(fast_translate(line, lang))
 
-    # مراحل مرقمة تفصيلية
     raw_steps = [s.strip() for s in meal["strInstructions"].split('.') if len(s.strip()) > 10]
     steps = [f"{i+1}. {fast_translate(s, lang)}" for i, s in enumerate(raw_steps)]
 
@@ -102,9 +110,9 @@ def format_recipe(meal: dict, lang: str) -> tuple[str, str]:
 📹 فيديو: {meal.get("strYoutube", "غير متوفر")}
     """.strip()
 
-    return text, meal["strMealThumb"]
+    return text, meal["strMealThumb"], meal
 
-# ──────────────── حفظ في الذاكرة (سريع) ────────────────
+# ──────────────── حفظ في الذاكرة ────────────────
 def cache_recipe(user_id: int, username: str | None, meal: dict, lang: str):
     row = {
         "User ID": user_id,
@@ -127,7 +135,7 @@ def cache_recipe(user_id: int, username: str | None, meal: dict, lang: str):
     }
     recipes_cache.append(row)
 
-# ──────────────── كتابة Excel عند الطلب فقط ────────────────
+# ──────────────── تصدير إلى Excel ────────────────
 def export_to_excel():
     if not recipes_cache:
         return False
@@ -135,11 +143,11 @@ def export_to_excel():
     df.to_excel(EXCEL_FILE, index=False, engine='openpyxl')
     return True
 
-# ──────────────── حالات FSM للبحث ────────────────
+# ──────────────── حالة البحث ────────────────
 class SearchForm(StatesGroup):
     waiting_for_query = State()
 
-# ──────────────── أوامر وبوت ────────────────
+# ──────────────── بداية البوت ────────────────
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -149,9 +157,12 @@ async def cmd_start(message: types.Message):
 
 @router.callback_query(lambda c: c.data.startswith("setlang_"))
 async def set_language(callback: types.CallbackQuery):
+    global user_languages  # مهم جدًا هنا
+
     lang = callback.data.split("_")[1]
     user_id = str(callback.from_user.id)
     user_languages[user_id] = lang
+
     with open(USERS_FILE, "w", encoding="utf-8") as f:
         json.dump(user_languages, f, ensure_ascii=False, indent=2)
 
@@ -179,8 +190,8 @@ async def random_recipe(callback: types.CallbackQuery):
             await callback.answer("خطأ في جلب الوصفة", show_alert=True)
             return
 
-        text, photo_url = format_recipe(meal, lang)
-        cache_recipe(callback.from_user.id, callback.from_user.username, meal, lang)
+        text, photo_url, raw_meal = format_recipe(meal, lang)
+        cache_recipe(callback.from_user.id, callback.from_user.username, raw_meal, lang)
 
         await callback.message.answer_photo(photo=photo_url, caption=text, parse_mode="Markdown")
         await callback.answer("تم الحفظ في الذاكرة ✓")
@@ -198,7 +209,6 @@ async def process_search(message: types.Message, state: FSMContext):
     lang = user_languages.get(str(message.from_user.id), 'ar')
     query = message.text.strip()
 
-    # ترجمة الاستعلام إلى الإنجليزية إذا لزم
     if lang != 'en':
         query = fast_translate(query, 'en')
 
@@ -209,8 +219,8 @@ async def process_search(message: types.Message, state: FSMContext):
             await state.clear()
             return
 
-        text, photo_url = format_recipe(meal, lang)
-        cache_recipe(message.from_user.id, message.from_user.username, meal, lang)
+        text, photo_url, raw_meal = format_recipe(meal, lang)
+        cache_recipe(message.from_user.id, message.from_user.username, raw_meal, lang)
 
         await message.answer_photo(photo=photo_url, caption=text, parse_mode="Markdown")
         await state.clear()
@@ -223,9 +233,28 @@ async def cmd_recipes(message: types.Message):
     else:
         await message.answer("لا توجد وصفات محفوظة بعد.")
 
-# ──────────────── التشغيل ────────────────
+# ──────────────── Webhook + Startup ────────────────
+async def on_startup():
+    await bot.delete_webhook(drop_pending_updates=True)
+    webhook_url = f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/webhook"
+    await bot.set_webhook(webhook_url)
+    print(f"Webhook تم ضبطه على: {webhook_url}")
+
+app = web.Application()
+webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+webhook_handler.register(app, path="/webhook")
+setup_application(app, dp, bot=bot)
+
 async def main():
-    await dp.start_polling(bot)
+    await on_startup()
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000)))
+    await site.start()
+
+    print(f"الخادم شغال على المنفذ {os.environ.get('PORT', 10000)}")
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
