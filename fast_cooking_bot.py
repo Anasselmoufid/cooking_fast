@@ -5,7 +5,7 @@ from datetime import datetime
 
 import aiohttp
 from aiogram import Bot, Dispatcher, Router, types
-from aiogram.filters import Command, Text
+from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -29,7 +29,7 @@ LANGUAGES = {
     'en': 'English 🇬🇧'
 }
 
-# قائمة الدول المتاحة في TheMealDB (حوالي 30 دولة حاليًا)
+# قائمة الدول (من TheMealDB)
 COUNTRIES = [
     "American", "British", "Canadian", "Chinese", "Croatian", "Dutch", "Egyptian",
     "French", "Greek", "Indian", "Irish", "Italian", "Jamaican", "Japanese",
@@ -37,7 +37,7 @@ COUNTRIES = [
     "Thai", "Tunisian", "Turkish", "Vietnamese", "Unknown"
 ]
 
-# ──────────────── لوحة الدول الدائمة ────────────────
+# ──────────────── لوحة الدول الدائمة تحت خانة الكتابة ────────────────
 def get_countries_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text=country)] for country in COUNTRIES],
@@ -55,11 +55,31 @@ async def fetch_meals_by_country(session: aiohttp.ClientSession, country: str):
         data = await resp.json()
         return data.get("meals", [])
 
-# ──────────────── تنسيق وصفة بسيط (بدون parse_mode) ────────────────
+# ──────────────── جلب تفاصيل وصفة معينة ────────────────
+async def fetch_meal_details(session: aiohttp.ClientSession, meal_id: str):
+    url = f"https://www.themealdb.com/api/json/v1/1/lookup.php?i={meal_id}"
+    async with session.get(url) as resp:
+        if resp.status != 200:
+            return None
+        data = await resp.json()
+        return data.get("meals", [None])[0]
+
+# ──────────────── تنسيق الوصفة (بسيط وآمن بدون parse_mode) ────────────────
 def format_recipe(meal: dict, lang: str = 'ar') -> str:
     name = meal["strMeal"]
     area = meal["strArea"]
     category = meal.get("strCategory", "غير معروف")
+
+    ingredients = []
+    for i in range(1, 21):
+        ing = meal.get(f"strIngredient{i}")
+        mea = meal.get(f"strMeasure{i}")
+        if ing and ing.strip() and ing.lower() != "null":
+            line = f"{mea.strip()} {ing.strip()}" if mea and mea.strip() != "-" else ing.strip()
+            ingredients.append(line)
+
+    raw_steps = [s.strip() for s in meal["strInstructions"].split('.') if len(s.strip()) > 10]
+    steps = [f"{i+1}. {s}" for i, s in enumerate(raw_steps)]
 
     text = f"""
 🍽 {name}
@@ -67,7 +87,13 @@ def format_recipe(meal: dict, lang: str = 'ar') -> str:
 🏳️ الدولة: {area}
 📌 التصنيف: {category}
 
-اضغط على اسم الوصفة للتفاصيل الكاملة.
+📋 المكونات ({len(ingredients)}):
+• {'\n• '.join(ingredients)}
+
+🔢 طريقة التحضير ({len(steps)} خطوة):
+{"\n".join(steps)}
+
+📹 فيديو: {meal.get("strYoutube", "غير متوفر")}
     """.strip()
 
     return text
@@ -87,15 +113,10 @@ async def cmd_start(message: types.Message):
         reply_markup=kb
     )
 
-# ──────────────── حفظ اللغة وعرض قائمة الدول مباشرة ────────────────
+# ──────────────── حفظ اللغة وعرض قائمة الدول مباشرة ودائمة ────────────────
 @router.message(Text([LANGUAGES['ar'], LANGUAGES['en']]))
 async def set_language_and_show_countries(message: types.Message):
     lang = 'ar' if message.text == LANGUAGES['ar'] else 'en'
-
-    # حفظ اللغة (اختياري، يمكن إزالته إذا لا تحتاجه)
-    user_id = str(message.from_user.id)
-    with open("users_lang.json", "w", encoding="utf-8") as f:
-        json.dump({user_id: lang}, f, ensure_ascii=False)
 
     await message.answer(
         "تم اختيار اللغة ✓\nاختر دولة من القائمة أدناه:" if lang == 'ar' else
@@ -103,12 +124,10 @@ async def set_language_and_show_countries(message: types.Message):
         reply_markup=get_countries_keyboard()
     )
 
-# ──────────────── عند اختيار دولة ────────────────
+# ──────────────── عند الضغط على دولة من القائمة ────────────────
 @router.message(Text(COUNTRIES))
 async def handle_country_selection(message: types.Message):
     country = message.text
-    lang = 'ar'  # أو اقرأ من الملف إذا احتجت
-
     await message.answer(f"جاري جلب وصفات {country}... ⏳")
 
     async with aiohttp.ClientSession() as session:
@@ -116,7 +135,7 @@ async def handle_country_selection(message: types.Message):
 
         if not meals:
             await message.answer(
-                f"لا توجد وصفات متاحة حاليًا من {country} في قاعدة البيانات.",
+                f"لا توجد وصفات متاحة حاليًا من {country}.",
                 reply_markup=get_countries_keyboard()
             )
             return
@@ -137,19 +156,17 @@ async def handle_country_selection(message: types.Message):
 @router.message()
 async def handle_meal_selection(message: types.Message):
     meal_name = message.text.strip()
-    lang = 'ar'  # أو اقرأ من الملف
 
     await message.answer(f"جاري جلب تفاصيل {meal_name}... ⏳")
 
     async with aiohttp.ClientSession() as session:
-        # بحث عن الوصفة بالاسم
         url = f"https://www.themealdb.com/api/json/v1/1/search.php?s={meal_name}"
         async with session.get(url) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 meal = data.get("meals", [None])[0]
                 if meal:
-                    text = format_recipe(meal, lang)
+                    text = format_recipe(meal)
                     await message.answer_photo(photo=meal["strMealThumb"], caption=text)
                     await message.answer("اختر دولة أخرى أو وصفة أخرى:", reply_markup=get_countries_keyboard())
                 else:
