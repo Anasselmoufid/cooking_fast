@@ -18,7 +18,7 @@ from aiohttp import web
 from deep_translator import GoogleTranslator
 import pandas as pd
 
-# ──────────────── إعدادات أساسية ────────────────
+# ──────────────── إعدادات ────────────────
 TOKEN = "8719774473:AAG6_COb6UElTsmzxlJJNaltmrJoL5QsqvQ"           # ← غيّر التوكن هنا
 logging.basicConfig(level=logging.INFO)
 
@@ -30,12 +30,11 @@ dp.include_router(router)
 
 USERS_FILE = "users_lang.json"
 EXCEL_FILE = "recipes.xlsx"
-recipes_cache = []  # تخزين مؤقت للوصفات (للسرعة)
+recipes_cache = []  # تخزين مؤقت للوصفات
 
-# متغير عالمي للغات المستخدمين
+# متغير عالمي للغات
 user_languages = {}
 
-# تحميل اللغات عند البدء
 if os.path.exists(USERS_FILE):
     with open(USERS_FILE, "r", encoding="utf-8") as f:
         user_languages = json.load(f)
@@ -53,10 +52,10 @@ CONTINENT_MAP = {
     "Saudi Arabian": "Asia", "Syrian": "Asia", "Turkish": "Asia",
     "Italian": "Europe", "British": "Europe", "French": "Europe",
     "American": "North America", "Mexican": "North America",
-    # أضف المزيد إذا أردت
+    # أكمل إذا أردت
 }
 
-# ──────────────── ترجمة مع cache ────────────────
+# ──────────────── ترجمة سريعة مع cache ────────────────
 @lru_cache(maxsize=1000)
 def fast_translate(text: str, target: str) -> str:
     if target == 'en' or not text:
@@ -76,7 +75,7 @@ async def fetch_recipe(session: aiohttp.ClientSession, query: str = None):
         data = await resp.json()
         return data.get("meals", [None])[0]
 
-# ──────────────── تنسيق الوصفة ────────────────
+# ──────────────── تنسيق الوصفة (بدون parse_mode لتجنب الأخطاء) ────────────────
 def format_recipe(meal: dict, lang: str) -> tuple:
     name = fast_translate(meal["strMeal"], lang)
     area = fast_translate(meal["strArea"], lang)
@@ -95,7 +94,7 @@ def format_recipe(meal: dict, lang: str) -> tuple:
     steps = [f"{i+1}. {fast_translate(s, lang)}" for i, s in enumerate(raw_steps)]
 
     text = f"""
-🍽 **{name}**
+🍽 {name}
 
 🏳️ الدولة: {area}
 🌍 القارة: {continent}
@@ -147,7 +146,7 @@ def export_to_excel():
 class SearchForm(StatesGroup):
     waiting_for_query = State()
 
-# ──────────────── بداية البوت ────────────────
+# ──────────────── أوامر البوت ────────────────
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -157,7 +156,7 @@ async def cmd_start(message: types.Message):
 
 @router.callback_query(lambda c: c.data.startswith("setlang_"))
 async def set_language(callback: types.CallbackQuery):
-    global user_languages  # مهم جدًا هنا
+    global user_languages
 
     lang = callback.data.split("_")[1]
     user_id = str(callback.from_user.id)
@@ -193,7 +192,8 @@ async def random_recipe(callback: types.CallbackQuery):
         text, photo_url, raw_meal = format_recipe(meal, lang)
         cache_recipe(callback.from_user.id, callback.from_user.username, raw_meal, lang)
 
-        await callback.message.answer_photo(photo=photo_url, caption=text, parse_mode="Markdown")
+        # بدون parse_mode لتجنب أخطاء Markdown
+        await callback.message.answer_photo(photo=photo_url, caption=text)
         await callback.answer("تم الحفظ في الذاكرة ✓")
 
 @router.callback_query(lambda c: c.data == "search")
@@ -222,7 +222,7 @@ async def process_search(message: types.Message, state: FSMContext):
         text, photo_url, raw_meal = format_recipe(meal, lang)
         cache_recipe(message.from_user.id, message.from_user.username, raw_meal, lang)
 
-        await message.answer_photo(photo=photo_url, caption=text, parse_mode="Markdown")
+        await message.answer_photo(photo=photo_url, caption=text)
         await state.clear()
 
 @router.message(Command("recipes", "وصفات"))
