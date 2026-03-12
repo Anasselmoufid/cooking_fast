@@ -19,7 +19,7 @@ from deep_translator import GoogleTranslator
 import pandas as pd
 
 # ──────────────── إعدادات ────────────────
-TOKEN = "8719774473:AAG6_COb6UElTsmzxlJJNaltmrJoL5QsqvQ"           # ← غيّر التوكن هنا
+TOKEN = "8719774473:AAG6_COb6UElTsmzxlJJNaltmrJoL5QsqvQ"   # ← غيّر التوكن هنا
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=TOKEN)
@@ -30,11 +30,9 @@ dp.include_router(router)
 
 USERS_FILE = "users_lang.json"
 EXCEL_FILE = "recipes.xlsx"
-recipes_cache = []  # تخزين مؤقت للوصفات
+recipes_cache = []
 
-# متغير عالمي للغات
 user_languages = {}
-
 if os.path.exists(USERS_FILE):
     with open(USERS_FILE, "r", encoding="utf-8") as f:
         user_languages = json.load(f)
@@ -52,10 +50,8 @@ CONTINENT_MAP = {
     "Saudi Arabian": "Asia", "Syrian": "Asia", "Turkish": "Asia",
     "Italian": "Europe", "British": "Europe", "French": "Europe",
     "American": "North America", "Mexican": "North America",
-    # أكمل إذا أردت
 }
 
-# ──────────────── ترجمة سريعة مع cache ────────────────
 @lru_cache(maxsize=1000)
 def fast_translate(text: str, target: str) -> str:
     if target == 'en' or not text:
@@ -65,7 +61,6 @@ def fast_translate(text: str, target: str) -> str:
     except:
         return text
 
-# ──────────────── جلب الوصفة ────────────────
 async def fetch_recipe(session: aiohttp.ClientSession, query: str = None):
     url = "https://www.themealdb.com/api/json/v1/1/random.php" if not query else \
           f"https://www.themealdb.com/api/json/v1/1/search.php?s={query}"
@@ -75,7 +70,6 @@ async def fetch_recipe(session: aiohttp.ClientSession, query: str = None):
         data = await resp.json()
         return data.get("meals", [None])[0]
 
-# ──────────────── تنسيق الوصفة (بدون parse_mode لتجنب الأخطاء) ────────────────
 def format_recipe(meal: dict, lang: str) -> tuple:
     name = fast_translate(meal["strMeal"], lang)
     area = fast_translate(meal["strArea"], lang)
@@ -111,7 +105,6 @@ def format_recipe(meal: dict, lang: str) -> tuple:
 
     return text, meal["strMealThumb"], meal
 
-# ──────────────── حفظ في الذاكرة ────────────────
 def cache_recipe(user_id: int, username: str | None, meal: dict, lang: str):
     row = {
         "User ID": user_id,
@@ -134,7 +127,6 @@ def cache_recipe(user_id: int, username: str | None, meal: dict, lang: str):
     }
     recipes_cache.append(row)
 
-# ──────────────── تصدير إلى Excel ────────────────
 def export_to_excel():
     if not recipes_cache:
         return False
@@ -142,11 +134,27 @@ def export_to_excel():
     df.to_excel(EXCEL_FILE, index=False, engine='openpyxl')
     return True
 
-# ──────────────── حالة البحث ────────────────
 class SearchForm(StatesGroup):
     waiting_for_query = State()
 
-# ──────────────── أوامر البوت ────────────────
+# ──────────────── القوائم ────────────────
+def get_main_menu(lang: str) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🍳 وصفة عشوائية" if lang=='ar' else "🍳 Random Recipe", callback_data="random")],
+        [InlineKeyboardButton(text="🔍 بحث عن وصفة" if lang=='ar' else "🔍 Search Recipe", callback_data="search")],
+        [InlineKeyboardButton(text="🔄 ابدأ من جديد" if lang=='ar' else "🔄 Start Over", callback_data="restart")],
+    ])
+    return kb
+
+async def show_main_menu(message_or_call, lang: str):
+    kb = get_main_menu(lang)
+    text = "اختر خياراً ↓" if lang=='ar' else "Choose an option ↓"
+    if isinstance(message_or_call, types.Message):
+        await message_or_call.answer(text, reply_markup=kb)
+    else:
+        await message_or_call.message.edit_text(text, reply_markup=kb)
+
+# ──────────────── الأوامر والأزرار ────────────────
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -166,19 +174,14 @@ async def set_language(callback: types.CallbackQuery):
         json.dump(user_languages, f, ensure_ascii=False, indent=2)
 
     await callback.message.edit_text("✅ تم حفظ اللغة!", reply_markup=None)
-    await show_main_menu(callback.message, lang)
+    await show_main_menu(callback, lang)
     await callback.answer()
 
-async def show_main_menu(message_or_call, lang: str):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🍳 وصفة عشوائية" if lang=='ar' else "🍳 Random", callback_data="random")],
-        [InlineKeyboardButton(text="🔍 بحث عن وصفة" if lang=='ar' else "🔍 Search", callback_data="search")],
-    ])
-    text = "اختر خياراً ↓" if lang=='ar' else "Choose an option ↓"
-    if isinstance(message_or_call, types.Message):
-        await message_or_call.answer(text, reply_markup=kb)
-    else:
-        await message_or_call.edit_text(text, reply_markup=kb)
+@router.callback_query(lambda c: c.data == "restart")
+async def restart(callback: types.CallbackQuery):
+    lang = user_languages.get(str(callback.from_user.id), 'ar')
+    await show_main_menu(callback, lang)
+    await callback.answer("تم العودة للقائمة الرئيسية ✓")
 
 @router.callback_query(lambda c: c.data == "random")
 async def random_recipe(callback: types.CallbackQuery):
@@ -192,9 +195,10 @@ async def random_recipe(callback: types.CallbackQuery):
         text, photo_url, raw_meal = format_recipe(meal, lang)
         cache_recipe(callback.from_user.id, callback.from_user.username, raw_meal, lang)
 
-        # بدون parse_mode لتجنب أخطاء Markdown
         await callback.message.answer_photo(photo=photo_url, caption=text)
-        await callback.answer("تم الحفظ في الذاكرة ✓")
+        # العودة للقائمة الرئيسية تلقائيًا
+        await show_main_menu(callback, lang)
+        await callback.answer("تم الحفظ ✓")
 
 @router.callback_query(lambda c: c.data == "search")
 async def start_search(callback: types.CallbackQuery, state: FSMContext):
@@ -217,6 +221,7 @@ async def process_search(message: types.Message, state: FSMContext):
         if not meal:
             await message.answer("❌ لم أجد وصفة بهذا الاسم، جرب اسم آخر.")
             await state.clear()
+            await show_main_menu(message, lang)  # عودة للقائمة
             return
 
         text, photo_url, raw_meal = format_recipe(meal, lang)
@@ -224,6 +229,7 @@ async def process_search(message: types.Message, state: FSMContext):
 
         await message.answer_photo(photo=photo_url, caption=text)
         await state.clear()
+        await show_main_menu(message, lang)  # عودة للقائمة بعد الوصفة
 
 @router.message(Command("recipes", "وصفات"))
 async def cmd_recipes(message: types.Message):
@@ -238,7 +244,7 @@ async def on_startup():
     await bot.delete_webhook(drop_pending_updates=True)
     webhook_url = f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/webhook"
     await bot.set_webhook(webhook_url)
-    print(f"Webhook تم ضبطه على: {webhook_url}")
+    print(f"Webhook set to: {webhook_url}")
 
 app = web.Application()
 webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
@@ -247,13 +253,11 @@ setup_application(app, dp, bot=bot)
 
 async def main():
     await on_startup()
-
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000)))
     await site.start()
-
-    print(f"الخادم شغال على المنفذ {os.environ.get('PORT', 10000)}")
+    print(f"Server running on port {os.environ.get('PORT', 10000)}")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
