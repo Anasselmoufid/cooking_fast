@@ -17,7 +17,7 @@ from youtube_search_python import VideosSearch
 import pandas as pd
 
 # ──────────────── إعدادات ────────────────
-TOKEN = "8719774473:AAG6_COb6UElTsmzxlJJNaltmrJoL5QsqvQ"  # ← غيّر التوكن
+TOKEN = os.environ["8719774473:AAG6_COb6UElTsmzxlJJNaltmrJoL5QsqvQ"]
 logging.basicConfig(level=logging.INFO)
 
 bot = Bot(token=TOKEN)
@@ -177,3 +177,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
