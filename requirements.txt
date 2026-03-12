@@ -1,5 +1,5 @@
 aiogram==3.*
 aiohttp
-youtubesearchpython
+youtube-search-python
 pandas
 openpyxl
