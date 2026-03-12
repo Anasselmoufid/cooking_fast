@@ -1,5 +1,2 @@
 aiogram==3.*
 aiohttp
-deep-translator
-pandas
-openpyxl
