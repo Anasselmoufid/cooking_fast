@@ -25,7 +25,7 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-EXCEL_FILE = "youtube_recipes.xlsx"
+EXCEL_FILE = "youtube-search-python"
 saved_recipes = []
 
 def main_keyboard():
@@ -117,3 +117,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
