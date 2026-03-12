@@ -2,37 +2,38 @@
 # -*- coding: utf-8 -*-
 
 """
-بوت تيليغرام للبحث عن وصفات الطعام في يوتيوب
-بدون استخدام API keys أو ذكاء اصطناعي
+بوت تيليغرام للبحث عن وصفات الطعام - نسخة Webhook لـ Render
+مدمج بالكامل وجاهز للتشغيل
 """
 
 import os
 import re
 import json
-import urllib.request
-import urllib.parse
-from html import unescape
+import time
+import requests
+from flask import Flask, request
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import yt_dlp
 
-# ==================== الإعدادات ====================
-TELEGRAM_TOKEN = "8719774473:AAG6_COb6UElTsmzxlJJNaltmrJoL5QsqvQ"  # ضع توكن البوت هنا
-
-# إعدادات البحث
+# ==================== الإعدادات الأساسية ====================
+TELEGRAM_TOKEN = "8719774473:AAG6_COb6UElTsmzxlJJNaltmrJoL5QsqvQ"
+RENDER_URL = "https://cooking-fast-1.onrender.com"
 MAX_RESULTS = 5
 
 # تهيئة البوت
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
+# تهيئة Flask
+app = Flask(__name__)
+
 # تخزين مؤقت لنتائج البحث
 user_sessions = {}
 
-# ==================== دالة البحث في يوتيوب بدون API ====================
+# ==================== دوال البحث في يوتيوب ====================
 def search_youtube(query):
     """البحث في يوتيوب باستخدام yt-dlp"""
     try:
-        # إعدادات yt-dlp للبحث
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
@@ -40,7 +41,6 @@ def search_youtube(query):
             'force_generic_extractor': False,
         }
         
-        # بحث في يوتيوب
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             search_query = f"ytsearch{MAX_RESULTS}:{query} recipe"
             result = ydl.extract_info(search_query, download=False)
@@ -91,26 +91,22 @@ def get_video_details(video_id):
         print(f"خطأ في جلب التفاصيل: {e}")
         return None
 
-# ==================== دوال تحليل الوصفة بدون ذكاء اصطناعي ====================
+# ==================== دوال تحليل الوصفة ====================
 def extract_ingredients(text):
     """استخراج المكونات من النص"""
     ingredients = []
     
-    # كلمات مفتاحية للمكونات
     ingredient_keywords = [
         'مكونات', 'المقادير', 'ingredients', 'تحتاج', 'نحتاج',
         'كوب', 'ملعقة', 'كيلو', 'جرام', 'غرام', 'حبة', 'حبات'
     ]
     
-    # تقسيم النص إلى سطور
     lines = text.split('\n')
-    
     ingredient_section = False
     
     for line in lines:
         line_lower = line.lower().strip()
         
-        # التحقق إذا كان هذا السطر بداية قسم المكونات
         if any(keyword in line_lower for keyword in ['مكونات', 'المقادير', 'ingredients']):
             ingredient_section = True
             continue
@@ -118,29 +114,25 @@ def extract_ingredients(text):
             ingredient_section = False
             break
         
-        # استخراج المكونات
         if ingredient_section and line and len(line) < 100:
-            # التحقق من وجود أرقام أو مقادير
             if any(keyword in line_lower for keyword in ingredient_keywords) or re.search(r'\d+', line):
                 clean_line = line.strip('•-*').strip()
                 if clean_line and len(clean_line) > 3:
                     ingredients.append(clean_line)
     
-    # إذا لم نجد مكونات، نبحث في كل النص
     if not ingredients:
-        for line in lines[:20]:  # أول 20 سطر فقط
+        for line in lines[:20]:
             if any(keyword in line.lower() for keyword in ingredient_keywords) or re.search(r'\d+\s*(كوب|ملعقة|جرام|غرام|حبة)', line):
                 clean_line = line.strip('•-*').strip()
                 if clean_line and len(clean_line) < 100:
                     ingredients.append(clean_line)
     
-    return ingredients[:12]  # نرجع أول 12 مكون
+    return ingredients[:12]
 
 def extract_instructions(text):
     """استخراج خطوات التحضير من النص"""
     instructions = []
     
-    # كلمات مفتاحية للتحضير
     instruction_keywords = [
         'طريقة', 'تحضير', 'خطوات', 'instructions', 'direction',
         'اول', 'ثاني', 'ثالث', '1.', '2.', '3.', '-', '•'
@@ -153,28 +145,24 @@ def extract_instructions(text):
     for line in lines:
         line_lower = line.lower().strip()
         
-        # بداية قسم التحضير
         if any(keyword in line_lower for keyword in ['طريقة', 'تحضير', 'instructions']):
             instruction_section = True
             continue
         elif instruction_section and line and len(line) > 10:
-            # تنظيف الخطوة
             step = line.strip('0123456789. •-').strip()
             if step and len(step) > 10 and step not in temp_instructions:
                 temp_instructions.append(step)
         
-        # نهاية القسم (عند العودة لمكونات أو معلومات أخرى)
         if instruction_section and 'مكونات' in line_lower:
             break
     
-    # إذا لم نجد تعليمات، نبحث عن فقرات طويلة
     if not temp_instructions:
         for line in lines:
             if len(line) > 30 and not re.search(r'http|www|@', line):
                 if 'مكونات' not in line.lower() and 'ingredients' not in line.lower():
                     temp_instructions.append(line.strip())
     
-    return temp_instructions[:8]  # نرجع أول 8 خطوات
+    return temp_instructions[:8]
 
 def extract_serving_tips(text):
     """استخراج نصائح التقديم"""
@@ -188,7 +176,7 @@ def extract_serving_tips(text):
             serving_tips.append(line.strip())
     
     if serving_tips:
-        return ' '.join(serving_tips[:2])  # نرجع أول نصيحتين
+        return ' '.join(serving_tips[:2])
     
     return 'يقدم ساخناً بالهناء والشفاء'
 
@@ -235,48 +223,44 @@ def get_continent_from_country(country):
     if country == 'غير محدد':
         return 'غير محدد'
     
-    continents = {
-        'آسيا': ['سعودي', 'مصري', 'شامي', 'لبناني', 'سوري', 'عراقي', 'يمني', 'عماني', 'اماراتي', 'كويتي', 'قطري', 'بحريني', 'تركي', 'هندي', 'باكستاني', 'صيني', 'ياباني', 'تايلاندي'],
-        'أفريقيا': ['مغربي', 'تونسي', 'جزائري', 'ليبي', 'مصري'],
-        'أوروبا': ['تركي', 'ايطالي', 'فرنسي'],
-        'أمريكا الشمالية': ['مكسيكي', 'امريكي'],
-        'أمريكا الجنوبية': [],
-        'أستراليا': []
-    }
-    
     country_lower = country.lower()
-    for continent, countries in continents.items():
-        for c in countries:
-            if c in country_lower:
-                return continent
+    
+    asia = ['سعودي', 'مصري', 'شامي', 'لبناني', 'سوري', 'عراقي', 'يمني', 'عماني', 'اماراتي', 'كويتي', 'قطري', 'بحريني', 'تركي', 'هندي', 'باكستاني', 'صيني', 'ياباني', 'تايلاندي']
+    africa = ['مغربي', 'تونسي', 'جزائري', 'ليبي', 'مصري']
+    europe = ['تركي', 'ايطالي', 'فرنسي']
+    north_america = ['مكسيكي', 'امريكي']
+    
+    for c in asia:
+        if c in country_lower:
+            return 'آسيا'
+    for c in africa:
+        if c in country_lower:
+            return 'أفريقيا'
+    for c in europe:
+        if c in country_lower:
+            return 'أوروبا'
+    for c in north_america:
+        if c in country_lower:
+            return 'أمريكا الشمالية'
     
     return 'غير محدد'
 
 def parse_recipe_info(title, description):
     """تحليل معلومات الوصفة"""
     
-    # استخراج المكونات
     ingredients = extract_ingredients(description)
     if not ingredients:
         ingredients = extract_ingredients(title + " " + description[:500])
     
-    # استخراج طريقة التحضير
     instructions = extract_instructions(description)
     if not instructions:
-        instructions = ["شاهد الفيديو للتفاصيل الكامل"]
+        instructions = ["شاهد الفيديو للتفاصيل الكاملة"]
     
-    # استخراج طريقة التقديم
     serving = extract_serving_tips(description)
-    
-    # تخمين الدولة
     country = guess_country_from_title(title)
-    
-    # تحديد القارة
     continent = get_continent_from_country(country)
     
-    # اسم الوصفة (تنظيف العنوان)
     recipe_name = title
-    # إزالة كلمات زائدة
     for word in ['وصفة', 'طريقة', 'عمل', 'تحضير', ' cooking', 'recipe', 'how to make']:
         recipe_name = recipe_name.replace(word, '')
     recipe_name = recipe_name.strip(' -:')
@@ -290,7 +274,6 @@ def parse_recipe_info(title, description):
         'serving': serving
     }
 
-# ==================== دوال تنسيق الرد ====================
 def format_recipe_response(video, recipe_info):
     """تنسيق الرد النهائي"""
     
@@ -303,7 +286,6 @@ def format_recipe_response(video, recipe_info):
 
 """
     
-    # إضافة الدولة والقارة
     if recipe_info['country'] != 'غير محدد':
         response += f"🌍 *الدولة:* {recipe_info['country']}\n"
     if recipe_info['continent'] != 'غير محدد':
@@ -311,14 +293,12 @@ def format_recipe_response(video, recipe_info):
     
     response += "\n"
     
-    # المكونات
     if recipe_info['ingredients']:
         response += "📋 *المكونات:*\n"
         for ing in recipe_info['ingredients']:
             response += f"• {ing}\n"
         response += "\n"
     
-    # طريقة التحضير
     if recipe_info['instructions']:
         response += "👩‍🍳 *طريقة التحضير:*\n"
         for i, step in enumerate(recipe_info['instructions'][:5], 1):
@@ -326,11 +306,9 @@ def format_recipe_response(video, recipe_info):
                 response += f"{i}. {step}\n"
         response += "\n"
     
-    # طريقة التقديم
     if recipe_info['serving']:
         response += f"🍽️ *طريقة التقديم:*\n{recipe_info['serving']}\n\n"
     
-    # رابط الفيديو
     response += f"🔗 رابط الفيديو: {video['url']}"
     
     return response
@@ -350,11 +328,10 @@ def send_welcome(message):
 • "باستا"
 
 ⚡ *مميزات البوت:*
-• بحث مباشر في يوتيوب (بدون API)
+• بحث مباشر في يوتيوب
 • استخراج المكونات تلقائياً
 • خطوات التحضير
 • معلومات عن الدولة والقارة
-• لا يحتاج أي مفاتيح API
 
 🔧 *الأوامر المتاحة:*
 /start - عرض رسالة الترحيب
@@ -368,10 +345,8 @@ def search_recipes(message):
     chat_id = message.chat.id
     query = message.text
     
-    # إرسال رسالة انتظار
     waiting_msg = bot.reply_to(message, "🔍 جاري البحث في يوتيوب...")
     
-    # البحث في يوتيوب
     videos = search_youtube(query)
     
     if not videos:
@@ -383,12 +358,10 @@ def search_recipes(message):
         )
         return
     
-    # تجهيز قائمة النتائج
     markup = InlineKeyboardMarkup(row_width=1)
     user_sessions[chat_id] = {'videos': videos}
     
     for i, video in enumerate(videos[:5]):
-        # اختصار العنوان الطويل
         title = video['title'][:45] + '...' if len(video['title']) > 45 else video['title']
         btn_text = f"{i+1}. {title}"
         markup.add(InlineKeyboardButton(
@@ -396,7 +369,6 @@ def search_recipes(message):
             callback_data=f"select_{i}"
         ))
     
-    # تحديث رسالة الانتظار
     bot.edit_message_text(
         f"✅ تم العثور على {len(videos)} نتيجة. اختر أحدها:",
         chat_id,
@@ -410,18 +382,15 @@ def handle_video_selection(call):
     chat_id = call.message.chat.id
     message_id = call.message.message_id
     
-    # استخراج رقم الفيديو المختار
     video_index = int(call.data.split('_')[1])
     video = user_sessions[chat_id]['videos'][video_index]
     
-    # تحديث الرسالة
     bot.edit_message_text(
         f"📥 جاري تحميل معلومات الفيديو:\n{video['title']}\n\n⏳ يرجى الانتظار...",
         chat_id,
         message_id
     )
     
-    # الحصول على تفاصيل الفيديو كاملة
     details = get_video_details(video['id'])
     
     if not details:
@@ -432,16 +401,10 @@ def handle_video_selection(call):
         )
         return
     
-    # تحديث معلومات الفيديو
     video.update(details)
-    
-    # تحليل معلومات الوصفة
     recipe_info = parse_recipe_info(video['title'], video['description'])
-    
-    # تجهيز الرد
     response = format_recipe_response(video, recipe_info)
     
-    # إرسال النتيجة
     bot.edit_message_text(
         response,
         chat_id,
@@ -450,7 +413,6 @@ def handle_video_selection(call):
         disable_web_page_preview=True
     )
     
-    # إرسال صورة مصغرة إذا وجدت
     if video.get('thumbnail'):
         try:
             bot.send_photo(
@@ -461,19 +423,81 @@ def handle_video_selection(call):
         except:
             pass
 
+# ==================== مسارات Webhook ====================
+@app.route('/', methods=['GET'])
+def index():
+    return "🍳 بوت الوصفات يعمل بنجاح! 🚀", 200
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if request.headers.get('content-type') == 'application/json':
+        json_string = request.get_data().decode('utf-8')
+        update = telebot.types.Update.de_json(json_string)
+        bot.process_new_updates([update])
+        return '', 200
+    return '❌ خطأ في الطلب', 403
+
+@app.route('/health', methods=['GET'])
+def health():
+    return "✅ البوت سليم", 200
+
+@app.route('/setup', methods=['GET'])
+def setup_webhook():
+    """تعيين webhook يدوياً"""
+    webhook_url = f"{RENDER_URL}/webhook"
+    set_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={webhook_url}"
+    response = requests.get(set_url)
+    
+    if response.status_code == 200 and response.json().get('ok'):
+        return f"✅ تم تعيين webhook بنجاح: {webhook_url}", 200
+    else:
+        return f"❌ فشل في تعيين webhook: {response.text}", 400
+
 # ==================== تشغيل البوت ====================
 if __name__ == '__main__':
-    print("=" * 50)
-    print("🤖 بوت الوصفات - بدون API Keys")
-    print("=" * 50)
-    print("\n✅ البوت يعمل...")
-    print("📱 ابحث عن بوتك في تيليغرام وابدأ باستخدامه")
-    print("\n❌ للخروج: Ctrl + C")
-    print("=" * 50)
+    print("=" * 60)
+    print("🍳 بوت الوصفات - نسخة Webhook لـ Render")
+    print("=" * 60)
     
-    try:
-        bot.infinity_polling()
-    except KeyboardInterrupt:
-        print("\n\n👋 تم إيقاف البوت")
-    except Exception as e:
-        print(f"\n❌ خطأ: {e}")
+    # حذف أي webhook قديم
+    delete_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/deleteWebhook"
+    delete_response = requests.post(delete_url, json={"drop_pending_updates": True})
+    
+    if delete_response.status_code == 200:
+        print("✅ تم حذف webhook القديم")
+    
+    # تعيين webhook جديد
+    webhook_url = f"{RENDER_URL}/webhook"
+    set_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook"
+    
+    webhook_config = {
+        "url": webhook_url,
+        "drop_pending_updates": True,
+        "max_connections": 40
+    }
+    
+    set_response = requests.post(set_url, json=webhook_config)
+    
+    if set_response.status_code == 200 and set_response.json().get('ok'):
+        print(f"✅ تم تعيين webhook بنجاح: {webhook_url}")
+        
+        # التحقق من webhook
+        info_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getWebhookInfo"
+        info_response = requests.get(info_url)
+        if info_response.status_code == 200:
+            info = info_response.json()
+            if info.get('ok'):
+                print(f"📊 معلومات webhook:")
+                print(f"   - الرابط: {info['result'].get('url')}")
+                print(f"   - في الانتظار: {info['result'].get('pending_update_count', 0)} تحديث")
+    else:
+        print(f"❌ فشل في تعيين webhook: {set_response.text}")
+    
+    print("\n🚀 البوت جاهز للعمل على Render...")
+    print(f"🌐 رابط التطبيق: {RENDER_URL}")
+    print(f"⚙️ رابط webhook: {webhook_url}")
+    print("=" * 60)
+    
+    # تشغيل Flask
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port, debug=False)
