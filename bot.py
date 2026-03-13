@@ -544,8 +544,22 @@ def handle_update(update: dict):
 #  Long Polling
 # ──────────────────────────────────────────────────────────────────────────
 
+def delete_webhook():
+    try:
+        r = requests.get(f"{API}/deleteWebhook", params={"drop_pending_updates": True}, timeout=10)
+        data = r.json()
+        if data.get("ok"):
+            logger.info("✅ تم حذف الـ webhook")
+        else:
+            logger.warning(f"deleteWebhook: {data}")
+    except Exception as e:
+        logger.error(f"deleteWebhook error: {e}")
+
+
 def run_polling():
     logger.info("🤖 بدء تشغيل البوت (long polling)...")
+    delete_webhook()
+    time.sleep(1)
     get_or_create_wb()
     offset = 0
     while True:
