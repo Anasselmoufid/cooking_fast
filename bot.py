@@ -178,65 +178,75 @@ def get_all_recipes() -> list:
 # ──────────────────────────────────────────────────────────────────────────
 
 def search_youtube(query: str, max_results: int = 6) -> list:
+    """البحث في يوتيب باستخدام yt-dlp."""
     try:
+        import yt_dlp
+
+        ydl_opts = {
+            "quiet":          True,
+            "no_warnings":    True,
+            "extract_flat":   True,
+            "default_search": f"ytsearch{max_results}",
+            "ignoreerrors":   True,
+        }
+        search_query = f"ytsearch{max_results}:{query} وصفة طبخ"
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(search_query, download=False)
+
+        if not info or "entries" not in info:
+            return []
+
+        videos = []
+        for entry in info["entries"]:
+            if not entry:
+                continue
+            duration_sec = entry.get("duration") or 0
+            minutes = round(duration_sec / 60)
+            view_count = entry.get("view_count") or 0
+            if view_count >= 1_000_000:
+                views = f"{view_count/1_000_000:.1f}M"
+            elif view_count >= 1_000:
+                views = f"{view_count/1_000:.0f}K"
+            else:
+                views = str(view_count) if view_count else "N/A"
+
+            vid_id  = entry.get("id", "")
+            url     = entry.get("url") or entry.get("webpage_url") or (
+                      f"https://www.youtube.com/watch?v={vid_id}" if vid_id else "")
+
+            videos.append({
+                "title":       entry.get("title", ""),
+                "url":         url,
+                "channel":     entry.get("uploader") or entry.get("channel", ""),
+                "duration":    minutes,
+                "views":       views,
+                "description": (entry.get("description") or "")[:200],
+            })
+        return videos
+
+    except Exception as e:
+        logger.error(f"YouTube search error: {e}")
+        # fallback: scraping بسيط
         try:
-            from youtubesearchpython import VideosSearch
-            search = VideosSearch(query + " وصفة طبخ", limit=max_results)
-            results = search.result()
-            videos = []
-            for item in results.get("result", []):
-                dur_str = item.get("duration") or "0:00"
-                parts = dur_str.split(":")
-                try:
-                    minutes = int(parts[0]) * 60 + int(parts[1]) if len(parts) == 3 else int(parts[0])
-                except Exception:
-                    minutes = 0
-
-                views_raw = item.get("viewCount", {})
-                views = views_raw.get("short", "N/A") if isinstance(views_raw, dict) else str(views_raw or "N/A")
-
-                desc = ""
-                snippet = item.get("descriptionSnippet")
-                if snippet and isinstance(snippet, list) and snippet:
-                    desc = snippet[0].get("text", "")
-
-                videos.append({
-                    "title":       item.get("title", ""),
-                    "url":         item.get("link", ""),
-                    "channel":     item.get("channel", {}).get("name", ""),
-                    "duration":    minutes,
-                    "views":       views,
-                    "description": desc,
-                })
-            return videos
-
-        except ImportError:
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-            params  = {"search_query": query + " وصفة طبخ", "hl": "ar"}
-            resp    = requests.get("https://www.youtube.com/results", params=params,
+            resp    = requests.get("https://www.youtube.com/results",
+                                   params={"search_query": query + " وصفة طبخ", "hl": "ar"},
                                    headers=headers, timeout=12)
-            ids     = re.findall(r'"videoId":"([^"]{11})"', resp.text)
-            titles  = re.findall(r'"title":\{"runs":\[\{"text":"([^"]+)"', resp.text)
-            chans   = re.findall(r'"ownerText":\{"runs":\[\{"text":"([^"]+)"', resp.text)
-
-            seen, videos = set(), []
-            for i, vid_id in enumerate(ids):
-                if vid_id in seen or len(videos) >= max_results:
-                    break
-                seen.add(vid_id)
+            ids    = list(dict.fromkeys(re.findall(r'"videoId":"([^"]{11})"', resp.text)))
+            titles = re.findall(r'"title":\{"runs":\[\{"text":"([^"]+)"', resp.text)
+            chans  = re.findall(r'"ownerText":\{"runs":\[\{"text":"([^"]+)"', resp.text)
+            videos = []
+            for i, vid_id in enumerate(ids[:max_results]):
                 videos.append({
                     "title":       titles[i] if i < len(titles) else f"وصفة {i+1}",
                     "url":         f"https://www.youtube.com/watch?v={vid_id}",
                     "channel":     chans[i] if i < len(chans) else "قناة يوتيب",
-                    "duration":    0,
-                    "views":       "N/A",
-                    "description": "",
+                    "duration":    0, "views": "N/A", "description": "",
                 })
             return videos
-
-    except Exception as e:
-        logger.error(f"YouTube search error: {e}")
-        return []
+        except Exception as e2:
+            logger.error(f"Fallback search error: {e2}")
+            return []
 
 # ──────────────────────────────────────────────────────────────────────────
 #  Telegram API helpers
